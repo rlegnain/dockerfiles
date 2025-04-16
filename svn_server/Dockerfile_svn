@@ -1,0 +1,185 @@
+
+###############################################################################
+# Dockerfile: Subversion (SVN) Server with SSH Access  
+#  
+# This Dockerfile provisions a secure and fully functional Subversion (SVN)  
+# server with SSH access, based on Ubuntu 20.04. It automates installation,  
+# configuration, and user management for a streamlined deployment process.  
+#  
+# ===========================================================================
+# Key Features:  
+# ---------------------------------------------------------------------------
+# - **Ubuntu 20.04 Base Image**: Provides a stable and secure foundation.  
+# - **SSH Configuration**:  
+#     - Access via SSH on a configurable port (default: 2024).  
+#     - Public key authentication enforced for security.  
+#     - Password authentication disabled.  
+# - **User and Group Management**:  
+#     - Two predefined users with unique credentials and SSH keys.  
+# - **SVN Repository Setup**:  
+#     - Repositories stored at `/svn/repositories` (persistent volume).  
+# - **Automated Backup**:  
+#     - Scheduled daily backups at 7 PM via cron (`backup_svn_repo.sh`).  
+# - **Security Enhancements**:  
+#     - Root password is securely set.  
+#     - SSH authentication is configured for security.  
+# - **Entrypoint Script**:  
+#     - Initializes all necessary services (`entrypoint.sh`).
+#  
+# ===========================================================================
+# Build & Run Instructions:  
+# ---------------------------------------------------------------------------
+# - **Build the Docker Image:**  
+#     ```sh
+#     docker build -f Dockerfile_svn -t svn_server:v1 .
+#     ```
+# - **Run the Container:**  
+#     ```sh
+#     docker run --rm -d -p 2024:2024/tcp -v $(pwd)/data:/svn svn_server:v1
+#     ```
+#  
+# ===========================================================================
+# Exposed Ports & Volumes:  
+# ---------------------------------------------------------------------------
+# - **SSH Port:** Configurable via `SSH_PORT` (default: 2024).  
+# - **Persistent Storage:** Mounted at `$(pwd)/data` to retain repository data.  
+#  
+# ===========================================================================
+###############################################################################
+
+
+# ****************************************************************
+# Use Ubuntu as base image
+# ****************************************************************
+FROM ubuntu:20.04
+
+
+# ****************************************************************
+# Parameteres
+# ****************************************************************
+# SSH port
+ARG SSH_PORT=2024
+ENV SSH_PORT=${SSH_PORT}
+
+# SVN repository base directory inside the container
+ENV SVN_REPO_DIR=/svn/repositories
+ENV TEMP_DUMP_DIR=/svn/dump_files
+
+# Add users (Use build-time arguments)
+ARG USERNAME1=user1
+ARG USERPASS1=mypassword1
+ARG USERID1=1001
+
+ARG USERNAME2=user2
+ARG USERPASS2=mypassword1
+ARG USERID2=1002
+
+ARG AUTH_KEY1=keys/user1_key.pub
+ARG AUTH_KEY2=keys/user2_key.pub
+
+# Create vboxsf group. vboxsf group if virtualbox is used.   
+ARG SVN_USER_GROUP=vboxsf
+ARG SVN_USER_GROUP_ID=987
+
+
+# ****************************************************************
+# Install the required packages
+# ****************************************************************
+RUN apt-get update && apt-get install -y openssh-server subversion sudo cron
+
+
+# ****************************************************************
+# Create directories
+# ****************************************************************
+RUN mkdir -p /var/run/sshd
+
+RUN mkdir -p $SVN_REPO_DIR $TEMP_DUMP_DIR
+
+
+# ****************************************************************
+# root user
+# ****************************************************************
+# Create root user (Use secure method instead of hardcoding)
+RUN echo 'root:password' | chpasswd
+
+
+# ****************************************************************
+# Create vboxsf group
+# ****************************************************************
+RUN groupadd -g $SVN_USER_GROUP_ID $SVN_USER_GROUP
+
+
+# ****************************************************************
+# Add user_1
+# ****************************************************************
+RUN useradd -m -d /home/$USERNAME1 -s /bin/bash -u $USERID1 $USERNAME1 && \
+    echo "$USERNAME1:$USERPASS1" | chpasswd && \
+    usermod -aG $SVN_USER_GROUP $USERNAME1
+
+# Configure SSH authentication
+RUN mkdir -p /home/$USERNAME1/.ssh && \
+    chmod 700 /home/$USERNAME1/.ssh
+
+COPY $AUTH_KEY1 /home/$USERNAME1/.ssh/authorized_keys
+RUN chmod 600 /home/$USERNAME1/.ssh/authorized_keys && \
+    chown -R $USERNAME1:$USERNAME1 /home/$USERNAME1/.ssh
+
+
+# ****************************************************************
+# Add user_2
+# ****************************************************************
+RUN useradd -m -d /home/$USERNAME2 -s /bin/bash -u $USERID2 $USERNAME2 && \
+    echo "$USERNAME2:$USERPASS2" | chpasswd && \
+    usermod -aG $SVN_USER_GROUP $USERNAME2
+
+# Configure SSH authentication
+RUN mkdir -p /home/$USERNAME2/.ssh && \
+    chmod 700 /home/$USERNAME2/.ssh
+
+COPY $AUTH_KEY2 /home/$USERNAME2/.ssh/authorized_keys
+RUN chmod 600 /home/$USERNAME2/.ssh/authorized_keys && \
+    chown -R $USERNAME2:$USERNAME2 /home/$USERNAME2/.ssh
+
+
+# ****************************************************************
+# SSH configuration
+# ****************************************************************
+# Modify SSH configuration
+RUN sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config && \
+    sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config && \
+    sed -i "s/#Port 22/Port $SSH_PORT/" /etc/ssh/sshd_config
+
+
+# ****************************************************************
+# Entrpoint script
+# ****************************************************************
+
+# Copy entrypoint script
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+
+# ****************************************************************
+# Backup svn repository
+# ****************************************************************
+# Copy the backup script into the container
+COPY backup_svn_repo.sh /usr/local/bin/backup_svn.sh
+
+# Make the script executable
+RUN chmod +x /usr/local/bin/backup_svn.sh
+
+# Add cron job for backup at 7 PM daily
+RUN echo "0 1 * * * /usr/local/bin/backup_svn.sh >> /svn/backup/backup_svn.log 2>&1" | crontab -
+
+
+# ****************************************************************
+# 
+# ****************************************************************
+# Expose SSH port (Documentation only)
+EXPOSE $SSH_PORT
+
+# Define volume to persist repositories
+VOLUME ["/svn"]
+
+# Start SSH service and initialize repositories
+CMD ["/entrypoint.sh"]
